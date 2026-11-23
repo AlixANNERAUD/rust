@@ -451,13 +451,14 @@ fn test_open_nofollow() {
             matches!(err.raw_os_error().unwrap(), libc::ELOOP | libc::EMLINK),
             "unexpected errno: {err}"
         );
-        // If we set O_DIRECTORY, we get a different error on Linux, but still EMLINK on FreeBSD.
+        // If we set O_DIRECTORY, we get ENOTDIR on Linux, but still EMLINK on FreeBSD.
+        // On Windows hosts we get FilesystemLoop which translates to ELOOP.
         let err = errno_result(unsafe {
             libc::open(symlink_cpath.as_ptr(), libc::O_NOFOLLOW | libc::O_DIRECTORY)
         })
         .unwrap_err();
         assert!(
-            matches!(err.raw_os_error().unwrap(), libc::ENOTDIR | libc::EMLINK),
+            matches!(err.raw_os_error().unwrap(), libc::ENOTDIR | libc::ELOOP | libc::EMLINK),
             "unexpected errno: {err}"
         );
     }
@@ -612,7 +613,7 @@ fn test_openat(
 
         // FIXME: O_NOFOLLOW does not work with openat on Windows hosts.
         // See <https://github.com/rust-lang/miri/issues/5406>.
-        if cfg!(not(windows_host)) {
+        // if cfg!(not(windows_host)) { // cfg(bootstrap) -- remove `if` on bootstrap bump so test always runs
             // That should fail with O_NOFOLLOW.
             let err = errno_result(unsafe { openat(dirfd, c"dirlink".as_ptr(), libc::O_NOFOLLOW) })
                 .unwrap_err();
@@ -636,7 +637,7 @@ fn test_openat(
             let data = libc_utils::read_to_end(fd).unwrap();
             assert_eq!(&data, b"data");
             errno_check(unsafe { libc::close(fd) });
-        }
+        // }
     }
 
     errno_check(unsafe { libc::close(dirfd) });
