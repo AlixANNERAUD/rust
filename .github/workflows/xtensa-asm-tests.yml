@@ -1,0 +1,87 @@
+# Fork-only workflow: remove this file before opening a pull request.
+#
+# Upstream CI does not build the Xtensa LLVM backend, so the Xtensa asm tests
+# never run there. This workflow builds LLVM with Xtensa and runs them.
+name: Xtensa asm tests
+
+on:
+  push:
+    branches: ["fix/xtensa-**"]
+  workflow_dispatch:
+
+jobs:
+  test:
+    if: github.repository != 'rust-lang/rust'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - uses: actions/checkout@v4
+        with:
+          # Bootstrap uses the history to find the last upstream merge.
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      # Bootstrap requires an explicit --stage when it runs in CI.
+      - name: Configure
+        run: |
+          cat > bootstrap.toml <<'TOML'
+          change-id = "ignore"
+          llvm.download-ci-llvm = false
+          llvm.targets = "X86"
+          llvm.experimental-targets = "Xtensa"
+          llvm.link-jobs = 2
+          rust.download-rustc = false
+          TOML
+          echo "llvm=$(git rev-parse HEAD:src/llvm-project)" >> "$GITHUB_ENV"
+          # Bootstrap skips this checkout when the LLVM build comes from the
+          # cache, but it still needs the LLD sources.
+          git submodule update --init --depth 1 src/llvm-project
+
+      - name: Restore LLVM
+        id: llvm-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/x86_64-unknown-linux-gnu/llvm
+          key: llvm-xtensa-${{ env.llvm }}-v1
+
+      - name: Run the Xtensa tests
+        run: |
+          ./x test --stage 1 \
+            tests/codegen-llvm/asm/xtensa-clobbers.rs \
+            tests/assembly-llvm/asm/xtensa-types.rs \
+            tests/assembly-llvm/c-variadic/xtensa.rs
+
+      # The codegen test checks the LLVM IR only. This step compiles the same
+      # code to assembly, to make sure that LLVM accepts all the clobbers.
+      - name: Compile the clobber test to assembly
+        run: |
+          test=tests/assembly-llvm/asm/xtensa-clobbers-generated.rs
+          sed -e '/^\/\/ \(CHECK\|esp32\|esp32s2\|call0\)/d' \
+            -e '1a //@ assembly-output: emit-asm' \
+            tests/codegen-llvm/asm/xtensa-clobbers.rs > "$test"
+          printf '// CHECK-LABEL: optional_clobbers:\n// CHECK-LABEL: clobber_abi:\n' >> "$test"
+          ./x test --stage 1 "$test"
+          rm "$test"
+
+      - name: Save LLVM
+        if: always() && steps.llvm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/x86_64-unknown-linux-gnu/llvm
+          key: llvm-xtensa-${{ env.llvm }}-v1
+
+      - name: Tidy
+        if: always()
+        run: |
+          # Tidy reads the manifests of all submodules.
+          git -c submodule.src/llvm-project.update=none submodule update --init --depth 1
+          ./x test --stage 1 tidy
